@@ -186,7 +186,7 @@ header{height:54px;display:flex;align-items:center;gap:14px;padding:0 14px;borde
   <div class="brand">Gcode Layer Editor <small>層ごとに設計 · 3D toolpath ↔ G-code</small></div>
   <div class="header-actions"><button id="jumpLayers" class="primary">層編集へ</button>
     <button id="newBtn">新規</button>
-    <button id="openBtn">G-codeを開く</button>
+    <button id="openBtn">G-code / 3MFを開く</button>
     <button id="saveGBtn">G-code出力</button>
     <button id="save3mfBtn" class="primary">3MF出力</button>
     <button id="helpBtn">?</button>
@@ -329,7 +329,7 @@ header{height:54px;display:flex;align-items:center;gap:14px;padding:0 14px;borde
     <div class="layerApply"><div id="layerApplyMessage" role="status" aria-live="polite"></div><button type="submit" id="applyLayer" class="primary">変更をモデル・G-codeに反映</button><button type="button" id="discardLayer">入力を戻す</button></div>
     <p class="layerNote">入力後に「反映」を押してください。層を切り替えると入力中の変更も反映します。G-code出力には層の設定も保存され、再度開くと編集を続けられます。</p>
   </form>
-  <details id="layerMore"><summary>初期モデル・全体の操作</summary><div class="layerActions"><button id="resetLayers">8層の初期モデル</button><button id="originalSample">元のG-codeを表示</button><button id="clearModel" class="danger">モデル全体を消去</button></div><p class="layerNote">消去・モデルの切替は「元に戻す」で取り消せます。元のG-codeには層設定がなく、直接編集で開きます。</p></details>
+  <details id="layerMore"><summary>初期モデル・全体の操作</summary><div class="layerActions"><button id="resetLayers">初期モデルに戻す</button><button id="originalSample">元のG-codeを表示</button><button id="clearModel" class="danger">モデル全体を消去</button></div><p class="layerNote">消去・モデルの切替は「元に戻す」で取り消せます。元のG-codeには層設定がなく、直接編集で開きます。</p></details>
 </aside>
 
   <section class="pane">
@@ -474,7 +474,7 @@ header{height:54px;display:flex;align-items:center;gap:14px;padding:0 14px;borde
  <div id="repairSummary"></div>
 </div>
 
-<input id="fileInput" type="file" accept=".gcode,.txt" hidden>
+<input id="fileInput" type="file" accept=".gcode,.txt,.3mf" hidden>
 
 
 
@@ -613,8 +613,9 @@ header{height:54px;display:flex;align-items:center;gap:14px;padding:0 14px;borde
 <div id="helpModal" class="modal">
 <div class="dialog">
   <h2>Gcode Layer Editor</h2>
-  <p>左の3D図面と右のG-codeが連動します。角丸四角形の8層モデルを初期表示します。左の層一覧から輪郭・高さ間隔・線種・位相を編集し、「反映」でG-codeを更新します。元の非平面G-codeは「初期モデル・全体の操作」から開けます。</p>
+  <p>左の3D図面と右のG-codeが連動します。初期画面には指定された sa.3mf と同じ11層モデルと造形設定を表示します。左の層一覧から輪郭・高さ間隔・線種・位相・AMS番号を編集し、「反映」でG-codeを更新できます。</p>
   <ul>
+    <li><b>3MFを開く</b>: Bambu Studio / Orca系の3MFに含まれるG-codeを読み込みます。Gcode Layer Editorの編集情報を含む3MFでは、層構成・速度・温度・材料・AMS設定も復元します。G-codeを含まない純粋な3Dモデル用3MFは対象外です。</li>
     <li><b>選択</b>: 3D上の線をクリックすると強調され、対応するG-code行も右画面で横一列強調表示されます。逆に右のG-code行へカーソルを置くと対応線を選択します。</li>
     <li><b>記号ヘルプ</b>: テキスト画面の「記号ヘルプ」で G/M/S/X/Y/Z/E/F の意味を確認できます。さらに選択中の行の意味をテキスト画面下部に自動表示します。</li>
     <li><b>線画</b>: Z値を指定して3D画面をクリックします。最初の点へG0移動し、以降の点間をG1押出し線として追加します。</li>
@@ -2044,6 +2045,103 @@ function zipStore(entries){
  return concat([...locals,centralBlob,end]);
 }
 
+
+/* ---------- 3MF import (ZIP reader) ----------
+   3MF is an OPC/ZIP container. Bambu/Orca sliced 3MF files normally keep
+   the printable toolpath in Metadata/*.gcode. Method 0 (store) and method 8
+   (deflate) are supported. */
+function zipU16(view,o){return view.getUint16(o,true)}
+function zipU32(view,o){return view.getUint32(o,true)}
+async function open3mfZip(file){
+  const bytes=new Uint8Array(await file.arrayBuffer()),view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  let eocd=-1;
+  for(let i=bytes.length-22;i>=Math.max(0,bytes.length-65557);i--){
+    if(zipU32(view,i)===0x06054b50){eocd=i;break}
+  }
+  if(eocd<0)throw Error('3MFのZIP終端情報が見つかりません。');
+  const count=zipU16(view,eocd+10),centralOffset=zipU32(view,eocd+16),entries=new Map(),dec=new TextDecoder();
+  let p=centralOffset;
+  for(let i=0;i<count;i++){
+    if(p+46>bytes.length||zipU32(view,p)!==0x02014b50)throw Error('3MFのZIPディレクトリが壊れています。');
+    const method=zipU16(view,p+10),compressedSize=zipU32(view,p+20),size=zipU32(view,p+24);
+    const nameLen=zipU16(view,p+28),extraLen=zipU16(view,p+30),commentLen=zipU16(view,p+32),localOffset=zipU32(view,p+42);
+    const name=dec.decode(bytes.subarray(p+46,p+46+nameLen)).replace(/^\/+/,'');
+    entries.set(name,{name,method,compressedSize,size,localOffset});
+    p+=46+nameLen+extraLen+commentLen;
+  }
+  async function read(name){
+    const e=entries.get(String(name).replace(/^\/+/,''));
+    if(!e)throw Error('3MF内に '+name+' がありません。');
+    const o=e.localOffset;
+    if(o+30>bytes.length||zipU32(view,o)!==0x04034b50)throw Error('3MF内の '+name+' のZIPヘッダが壊れています。');
+    const nameLen=zipU16(view,o+26),extraLen=zipU16(view,o+28),start=o+30+nameLen+extraLen;
+    const packed=bytes.slice(start,start+e.compressedSize);
+    if(e.method===0)return packed;
+    if(e.method===8){
+      if(typeof DecompressionStream==='undefined')throw Error('このブラウザは圧縮された3MFの展開に対応していません。');
+      let stream;
+      try{stream=new Blob([packed]).stream().pipeThrough(new DecompressionStream('deflate-raw'))}
+      catch{throw Error('このブラウザでは3MFのdeflate展開を開始できません。');}
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+    throw Error('3MF内の圧縮方式 '+e.method+' には対応していません。');
+  }
+  async function text(name){return new TextDecoder().decode(await read(name))}
+  return{entries,read,text};
+}
+async function extract3mfPayload(file){
+  const zip=await open3mfZip(file),names=[...zip.entries.keys()];
+  let gcodePath=null;
+  const modelSettings=names.find(n=>/^(?:Metadata\/)?model_settings\.config$/i.test(n));
+  if(modelSettings){
+    try{
+      const xml=await zip.text(modelSettings);
+      const m=xml.match(/key=["']gcode_file["'][^>]*value=["']([^"']+)["']/i);
+      if(m&&zip.entries.has(m[1].replace(/^\/+/,'')))gcodePath=m[1].replace(/^\/+/,'');
+    }catch{}
+  }
+  if(!gcodePath&&zip.entries.has('Metadata/plate_1.gcode'))gcodePath='Metadata/plate_1.gcode';
+  if(!gcodePath)gcodePath=names.find(n=>/\.gcode$/i.test(n))||null;
+  if(!gcodePath)throw Error('この3MFには編集できるG-codeが含まれていません。スライス済みのBambu/Orca系3MFを選んでください。');
+  const projectPath=names.find(n=>/^(?:Metadata\/)?project_settings\.config$/i.test(n));
+  return{
+    gcodePath,
+    gcode:await zip.text(gcodePath),
+    projectSettings:projectPath?await zip.text(projectPath):null
+  };
+}
+function first3mfValue(value){
+  if(Array.isArray(value))value=value[0];
+  if(value===undefined||value===null)return '';
+  return String(value).split(/[;,]/)[0].trim();
+}
+function apply3mfProjectSettings(text){
+  let p;try{p=JSON.parse(text)}catch{return}
+  const printer=String(p.printer_model||p.printer_settings_id||'').toLowerCase();
+  for(const [key,m] of Object.entries(MACHINES)){
+    if(printer&&String(m.name||'').toLowerCase()&&printer.includes(String(m.name).toLowerCase())){$('machine').value=key;break}
+  }
+  const nozzle=first3mfValue(p.nozzle_diameter||p.printer_variant);
+  if(['0.2','0.4','0.6','0.8'].includes(nozzle))$('nozzle').value=nozzle;
+  const fs=String(first3mfValue(p.filament_settings_id)).toLowerCase(),ft=String(first3mfValue(p.filament_type)).toLowerCase();
+  let material=null;
+  if(fs.includes('pla basic'))material='pla_basic';
+  else if(fs.includes('pla matte'))material='pla_matte';
+  else if(fs.includes('pla glow'))material='pla_glow';
+  else if(fs.includes('petg hf'))material='petg_hf';
+  else if(fs.includes('tpu for ams'))material='tpu_ams';
+  else if(ft.includes('tpu'))material='tpu95';
+  else if(ft.includes('petg'))material='generic_petg';
+  else if(ft.includes('pla'))material='generic_pla';
+  if(material&&MATERIALS[material])$('material').value=material;
+  for(const [id,key] of Object.entries({
+    lineWidth:'line_width',layerHeight:'layer_height',flow:'filament_flow_ratio',
+    hotend:'nozzle_temperature',bedtemp:'textured_plate_temp',mvs:'filament_max_volumetric_speed'
+  })){
+    const v=+first3mfValue(p[key]);if(Number.isFinite(v)&&$(id))$(id).value=v;
+  }
+}
+
 // compact MD5 implementation for UTF-8 bytes
 function md5(bytes){
  function rol(x,c){return (x<<c)|(x>>>(32-c))}
@@ -2438,7 +2536,7 @@ function syncLayersFromText(){
   layerEditor.detached=!!meta&&meta.hash!==LayerEngine.hash(LayerEngine.body(ta.value));
   $("applyLayer").textContent=layerEditor.detached?'層設定からG-codeを再生成':'変更をモデル・G-codeに反映';
   if(layerEditor.detached)layerMessage('G-codeに直接編集または一括設定の変更があります。「再生成」は全層の軌跡を設定から作り直します。直接編集した線は置き換わります。','pending');
-  else if(!meta&&ta.value.trim())layerMessage('このG-codeには層設定がありません。右側で直接編集するか「8層の初期モデル」で層編集を開始できます。','pending');
+  else if(!meta&&ta.value.trim())layerMessage('このG-codeには層設定がありません。右側で直接編集するか「初期モデルに戻す」で層編集を開始できます。','pending');
   else if(!layerEditor.dirty)layerMessage(layerEditor.layers.length?'層を選び、値を変更して反映してください。':'モデルは空です。「＋ 最上部に層を追加」で開始できます。');
 }
 function replaceLayerModel(layers,selected=layerEditor.selected){
@@ -2474,7 +2572,7 @@ $("jumpLayers").onclick=()=>$("layerPanel").scrollIntoView({behavior:'smooth'});
 $("layerUndo").onclick=()=>{saveHistory();undo();};
 $("addLayer").onclick=()=>{
   try{
-    if(!LayerEngine.decode(ta.value)&&state.segments.length){layerMessage('層設定のないG-codeには層を追加できません。「8層の初期モデル」または「モデル全体を消去」から層編集を開始してください。','pending');return;}
+    if(!LayerEngine.decode(ta.value)&&state.segments.length){layerMessage('層設定のないG-codeには層を追加できません。「初期モデルに戻す」または「モデル全体を消去」から層編集を開始してください。','pending');return;}
     if(layerEditor.detached){layerMessage('G-codeの変更があります。先に「再生成」で層設定に戻してください。','pending');return;}
     const layers=LayerEngine.clone(layerEditor.layers);if(layerEditor.dirty&&layers.length)layers[layerEditor.selected]=layerDraft();
     const l=layers.length?LayerEngine.clone(layers.at(-1)):LayerEngine.defaults();
@@ -2488,7 +2586,7 @@ $("removeLayer").onclick=()=>{
 };
 $("clearModel").onclick=()=>{replaceLayerModel([],0);$("onlyLayer").checked=false;draw();layerMessage('モデル全体を消去しました。「元に戻す」で復元できます。');};
 $("newBtn").onclick=$("clearModel").onclick;
-$("resetLayers").onclick=()=>{try{replaceLayerModel(Array.from({length:8},(_,i)=>LayerEngine.defaults(i)),0);fitLayerModel();}catch(err){layerMessage(err.message,'error');}};
+$("resetLayers").onclick=()=>{try{applySaInitialSettings();updateDesignModel();replaceLayerModel(saInitialLayers(),0);fitLayerModel();layerMessage('sa.3mf の初期モデルと設定に戻しました。');}catch(err){layerMessage(err.message,'error');}};
 $("originalSample").onclick=()=>{
   saveHistory();ta.value=SAMPLE_GCODE;state.gcodeModel={nozzle:.8,width:.8,height:.4,flow:.98,material:'pla_basic'};
   state.selected=-1;state.selectedLine=-1;state.drawAnchor=null;$("onlyLayer").checked=false;reparse(false);saveHistory();updateTemperatureBadge();fitLayerModel();
@@ -3083,9 +3181,43 @@ const previousApplyRecommendedDesign=applyRecommendedDesign;
 applyRecommendedDesign=function(){if(!speedEnabled())return previousApplyRecommendedDesign();if(speedInputErrors().length){showRepairReport([],speedInputErrors(),'入力を確認してください');return;}applyThreadDerived();updateDesignModel();};
 $('applyDesignBtn').onclick=()=>applyRecommendedDesign();
 function prepareLayerGcode(text){return speedEnabled()?threadGcode(text,{temperatures:true}).text:text;}
+
+const SA_INITIAL_SETTINGS={
+  speedMode:'thread',threadDiameter:'0.4',printSpeed:'30',firstSpeed:'10',contactSpeed:'5',contactZone:'0.4',
+  pathAccel:'1000',flowSource:'profile',machine:'a1mini',material:'pla_basic',nozzle:'0.4',
+  lineWidth:'0.67124',layerHeight:'0.2',flow:'0.98',hotend:'220',bedtemp:'65',mvs:'21',
+  safety:'75',travelSpeed:'100',amsFlushVolume:'250'
+};
+const SA_CONTOUR_B64='FayCAFwqqgCEACVrigEka5ICHmuWAxdrnQQMa6AFAGumBvFqqAfgaqwIzGqsCbZqrQqeaqsLg2qrDGVqpg1HaqEOJWqdDwFqlBDcaYsRtGl+EoppdBNeaWMUMWlTFQFpQRbQaC0XnWgXGGhoAxkwaOkZ+GfLGr5nrRuEZ4ocRmdoHQpnQh7JZhofiWbwH0dmyiADZpshvmVpInllNCMzZf4j7GTEJKVkkCVZZFUmD2QUJ8Vj0Sd5Y4woL2NGKeFiBCqRYrcqRWJnK/dhFSypYcksVmF2LQdhHC65YMAuaWBsLxZgDjDEX6wwdV9GMSVf7THPXoMygF4VMzBesjPbXUQ0iF3SNDpdZDXmXPQ1k1x4NkVcCDfwW483nltYQX9Uk0jSTq9L1Us5TyBIL1ODQ4tXvD06XHw29WB9LVhlniLIaAoWvmpeCOVqA/odaZ/rtWV+3h5h3tLDW8XI/lUlwAlQzrgTSp6yOkRprY0+B6luOaKlrk1UtrVCQKxLN06kFCxnnpEhS5reF5WXJQ/0lUMHH5V8AN6UuPvxlFj3NpUH86WVxu5BlpnqBZeD5u+XheL+mKDeMJrf2oCbPNfqnIfjgZnn7WSWNu5WlonuSZbi7jqWPe8slp7vHJYE8A2Wa/D9ldzw7ZVQ8d2Vy/HNlUnyu5XR8quVXfOZlfLziJWd9HWVRPVkleT1VJWv9kKVc/cylUb4IZUn+RKVGPoElRH795Qo/OuURv3jlHv+3ZTN/9qUwQDclOQB3ZQkA+eUjATylEAGCZU0CCuViwpglUkNrpWCECOWQRTKlmEYq5eYHL+YSiDWmUdasC0+Xck0ZV2HNIpdQTS0Xfkz312qMw9eUTM9Xv8ya16oMqJeQTLYXtoxDV93MU1f+jCIX4Qwyl8FMBJgci9YYOYuqWA8Lvhgky1QYdssr2EGLA9iMCt3YkIq7mIoKWZjAyjnY7omcWRRJQtlpSOuZcohYGagHxxnIR3mZyoau2idFpNpQRJcatcM9mreBSdrKAAma/T/JmuE/ycbkPN6B/70dGljEvtqWAUja3D/qGpI9tloO+pGZUDdul8L0FtYhsO5T4a4k0Zzr4s9WagWNfiidi0An58mFJyXIPGZSRtlmJMWRJdrEnSWrw7elWcLdpVqCDCVugUClUgD55QWAd2UyxKOlokIPJU0/umUHfSNlaHqCpf34S6ZPtrAm2nTmJ54zYihVMh2pNzDVqf+vxSqo7ywrLK5Ja8ht3Sx4bSZs9+yobUUsYm3hK9EuRWu8brWrHG8oKv2vZiqTL+lqZLAxajIwfSn78I2pwfEh6YLxealA8ZQpe/GxaTNx0CkqsjHo3XJU6M2yuyi78qHopzLJ6JMzMyh8sx7oYrNKqEgztygt86YoDzPUaDFzxGgSNDVn8DQlp8/0WOfq9EonybS+p6J0sSe/NKZnlvTaJ7C00CeIdQWnnzUKtdMwgc4raSlOlOmCT3yp2Q/nqmKQTurnkPkrI5FgK5dRxSwHkmtsb1KObNCTLy0s005tg9PrrdYUBu5i1F/urBS27vEUy+9x1R8vr1Vu7+jVvXAfVclwkxYTcMUWXTEzVmMxXtam8YkW6rHxFuuyFdcp8ntXKbKcF2Py/RdfcxvXmDN515BzlRfFM/EX/HPJ2C60ItghdHpYErSQmEI05hhxNPqYX7UOGIv1YVi29XMYorWFGMz1y9aYsc1Vl7A5FXvv5VViL9HVSC/81SzvphUOr5AVM696lNfvYlT6LwoU2y8yVL7u2hSg7v1Ufu6klGGuihRCrquUHu5QFADucpPe7hJT+y31E5ut0hO1rbGTU22P02/tapMJbUkTJy0fUv1s/FKarM/SsGyqkkvsvFIhbFOSOywiUc7sN9Go68JRumuUkVKrnVEk62lQ+isy0I4rN1BfKv9QM+q/j8QqgM/V6kJPqKo7zzep9g7H6fAOmWmmDmmpVQ426QqNySk1TVbo4U0nKIfM9WhvDEZoUMwVaDALpefMy3bnp0rIp7zKWadQSi0nIQmA5y1JFeb4yKxmv0gD5oMH3OZER3fmAsbUpj4GM6X4BZTl7gU35aKEnmWUhAalhIOyJXLC4GVgwlGlTIHGZXeBPeUiALilFUA2pTS/9mUlf/alGb/25QM/9uUof7clDP+3ZSM/eKUxfznlKj78JQE+gWVO/c3lWfx4pVA2k6d+J3uFkGegusByumkXuFSmY7gkpnI38+Z/t4QmhzeW5o83aaaW9z1mnDbR5t42qSbdNkHnG7YbZxg19qcRtZPnSHVzZ3001SettLlnnPRf58e0CSgws7XoFPNmKHdy2aiVspBo7vINqQQxzylX8VRpqHDe6e2wdGo3r8rqum9q6vdu0+txbkVr6K3/bButQ6zM7NMteiwubeerlC6SqwhvfqpH8Cxp1XDbKXFxj2jYsokoTLOJp8w0kqdWtaUm6jaC5oQ37WYkuOQlxronpao7OSVM/Fblaz1B5UR+uCUW/6ll/LvgpnG4C2YkOUKl47qHZan73qVi/QWlRj55pT6/NqUGgDulOQDKJUECJSVXAwyluAQDJeEFSGYRhp7mR0fFpv6I/Gc0CgIn5AtV6EvMtajoTZ+pt86QKnjPiCsqEICryNG5rFYScy0UUygtwBPabp3URu9tFO2v7dVOcKJV6HEMlnxxq9aJMkKXD3LQl2YzPldb8KwV1fB61Y+wCBWI79HVQu+clT5vJdT3buyUsu6y1G7ueRQprjwT5q3/U6OtgZOg7UETX20BUx7swFLebL0SXux6EiFsNxHi6/ERpyur0WwrZlEwqx4Q+GrXUICqz9BIqoYQE6p9z6AqNY9rqeqPOimhTslpl86aKU4Oa6kDjj9o+c2UKPANaeimTQBom8zY6FLMsugKDE5oAUwpZ/iLhufwS2YnqAsFp6GK5udayolnVIpsZw+KEOcJyfVmwcmeJsSJQ6b8CO4mvkiW5rhIQma7yCymd0fbJnvHhqZ4x3ZmP8ckJj0G1aYFxsSmBQa3Jc3GaSXRxhvl2UXQZeIFg2XmxXkltAUuJbmE5CWGhNvlkwSRZZtESmWrxAJlt8P65UUD9GVXQ64lZINn5XRDIqVIwx1lWILYpWoClKV/wlBlVEJM5WVCCWV8wcGl/ITNpddFqaWgRMuls4QzpVADoKV3AtKlaAJIJWjBwKVwAXvlBsE4pSnAtyUXwHblFkA3JQQ/+KUe/3tlND7A5Ue+iKVUPhHlX72d5WM9LOVkPL6lYPwUpZZ7reWIewql9fps5d350+YBeX/mH3iyZnl36aaOt2km4Dat5y21+md49Q+n/7RrKASzzyiKMztozbJv6VDxqunXMO6qXbA5qugvSau3LqKsCG49rKItYG1/7ITuJawsLpLrmC9F6wLwAyqtsIeqGnFS6YSyJyks8oOo0vNnKHaz0igXdIQn9DU8p001+yciNkAnMvbKZv83WSaGeC3mTHiE5ks5IiYFeYKmPnnlJe96TKXguvUlibthpbJ7kCWVvABltXxy5VL85qVsvRzlQn2UZVW9zSVmfgblc/5CZX8+veUYwiZldcRW5YFFe+WPhihl5wbe5gAH3CZgCKRmgEm0puUKUOdIy3TnqwwjaA8NHSiszd5pBY7oKZsPuqonkFPq69Exa2mR1ewcErwshVNlbWUT0C45lHsuhRUlL0YVjrA9FfRwrJZY8VIW+fHvlxWyhReucxOXwvPbmBK0XRhd9NjYpLVPmOY1wJkjtm6ZHjbXWVH3fNlB998Zrvg9WZY4mln7+POZ27lKWjh5n9oTOjKaKPpDmnv6k1pMOyFaWntuWmR7udpt+8QaszwNWrQ8Vhq3PJzasvzjmrO9KdqpPW8ap72zmpq995qQfjtahf5+WrQ+QJrn/oNa1v7E2sH/Bprv/wda3H9ImsQ/iVrq/4ka1n/JWvk/yhrGwAmaxwAJ2stACVrWwAma1oAJWt7ACZrpQAla6UAJWvyACdr/AAkaycBJWtlASJroAEia+UBIGs0Ah1rkQIbawwDF2ueAw9rUgQHa0IF8mqeBsxqlwh9atcLkGkoElNl9SFDWRI7KmDFLl1mfx9qaP4XCmkjFbpooRYnaZAUiWmHEuNpXBA1ai4Oe2riC7hqhQnrahsHDGukBCBrIgIla5P/FmuK/O5qLvmjaqD1MGq98Y1pnu2uaCzph2du5A5mY981ZBfa6WGF1Chfx87kW/DIIFgWw9NTS70WT763+UmEspFEsa3xPk+pTTl7paczJaIoLlGfzyjwnLsjAZucIAaaAic7nPIedJksFjSXLQ2ylXYE+pS1+/mUCfLOlQXonpf93W+aXtQvnm/LraJrw6unbLzgrG+2IrJrsTC3NK0DvKmpksDCprnER6ShyDuiKsyBoGzPCJ9p0s2dJtW4nLfX0JsD2gObMNxXmivevJkE4DaZwuHAmFvjW5jZ5PuXQeatl5HnZZfQ6COX/elQl3bpZpkf4TKZ0uEBmXbiy5g045qY4ONsmJTkOphS5Q6YAObdl8Pmspd+54iXNehYlwPpMJe96QmXferdllPrtpYV7JaW2uxrlrTtS5aD7imWTu8Ilirw55UF8cqV2fGvlbLyj5Wg83qVgPRilWH1S5VF9jWVPfcklSj4FJUY+QOVB/r4lAP77ZQF/OSUAf3flAD+3JQC/9qUCgDclP0A35T5AeSU7ALslPID95TsBAOV9AUVlfsGJ5UCCD2VFglVlSMKcJU7C5KVVgyylW0N2ZWNDgGWsg8ultQQX5b5EZSWKxPMllYUCZeDFUmXthaQl/EX2JcmGSWYXBp4mJgbzpjbHCqZGh6MmVgf7pmaIFia2yHHmiMjOptpJLKbrSUvnPQmr5w4KDWdfinDncMqUZ4LLOmeTy2An5MuIKDVL76gFTFooVIyFKKRM8OiyjR3owU2MaQ9N+ykcDiqpZ85b6bNOjGn9zv+pxw9yqg/PpmpXz9wqnxAQauVQRuspUL0rLJDza2/RKmuxEWQr8VGbrDDR0+xuUgzsqtJFbOZSv2zg0vjtGlMyLVITau2IU6Ut/dOfbjKT2G5lFBDulpRK7sfUhO83VLyvJNT2L1IVLm+/VSbv6FVfMBKVlrB7lY0wohXF8MmWO3DuVjFxExZocXYWXDGYFpLx+taFshoW+7I6Fu3yWBciMraXFfLTl1nzXNes84jXyDQ21+N0ZFgEtNGYaTU/GFK1rBi+tdlY8nZHGSZ28Rkld15ZZLfHGag4cNm3+NiZx3m+Wdx6IRo4OoMaXPthWkD8PRpv/JRaon1pGpn+N9qWPsNa2L+JGs6/iRrk/8na7wAJGvLARtr3QIVa94DC2vZBPxq0AXuasMG4mqnB81qkQi9amsJp2pGCpJqGAt6augLaGqwDExqdg0zajIOGWr0DgJqpg/kaVsQxmkTEbNprxGOaV0SdGkHE1NppRM5aT8UGmnYFPxobRXdaP8VwGiOFqBoHBeAaK8XYGg3GD9ouxgiaD0ZBWi/GeJnOxrDZ7capWcxG4VnqBtjZx0cS2eRHCVnAh0GZ3Ad52beHcZmSR6pZrMeiWYaH2lmgB9KZuUfLGZHIA1mqCDuZQgh0GVlIbBlxiGRZSUicWV+IlRl1iKbGBhUjvWiavT1s2qO9rhqNPfKagz42moL+e1qKPr9amj7C2vJ/BtrQP4haw==';
+let saContourCache=null;
+function saContourPoints(){
+  if(saContourCache)return saContourCache;
+  const raw=atob(SA_CONTOUR_B64),bytes=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
+  const view=new DataView(bytes.buffer);let x=view.getInt32(0,true),y=view.getInt32(4,true),out=[(x/1e5).toFixed(5)+','+(y/1e5).toFixed(5)];
+  for(let o=8;o<bytes.length;o+=4){x+=view.getInt16(o,true);y+=view.getInt16(o+2,true);out.push((x/1e5).toFixed(5)+','+(y/1e5).toFixed(5));}
+  return saContourCache=out.join('\n');
+}
+function saInitialLayers(){
+  const points=saContourPoints(),common={shape:'custom',cx:90,cy:90,width:60,depth:81.86254024613864,radius:10,sides:6,rotation:0,direction:'vertical',pitch:3,equilateral:false,dwell:500,fillAngle:0,points};
+  return Array.from({length:11},(_,i)=>({...common,
+    amsSlot:i%2?2:1,
+    gap:i===0?.2:i===1?.31:.81,
+    style:i===0?'fill':'triangle',
+    height:i===0?2:1.5,
+    phase:i%2?180:0,
+    spacing:i===0?.49688:.8
+  }));
+}
+function applySaInitialSettings(){
+  state.rheoOverride=null;
+  for(const [id,value] of Object.entries(SA_INITIAL_SETTINGS))if($(id))$(id).value=value;
+}
 function makeInitialModel(){
+  applySaInitialSettings();
   if(speedEnabled())applyThreadDerived();
-  const original=LayerEngine.generate(Array.from({length:8},(_,i)=>LayerEngine.defaults(i)),layerProcess()).text;
+  applySaInitialSettings();
+  const original=LayerEngine.generate(saInitialLayers(),layerProcess()).text;
   return refreshLayerHash(prepareLayerGcode(original),original);
 }
 function restoreSpeedSettings(input){
@@ -6065,9 +6197,25 @@ function bambuProjectConfig(p){
   return result;
 }
 
+
+const threeMfPreviousOpen=$('fileInput').onchange;
+$('fileInput').onchange=async e=>{
+  const file=e.target.files[0];if(!file)return;
+  if(!/\.3mf$/i.test(file.name||'')){await threeMfPreviousOpen(e);return;}
+  try{
+    const payload=await extract3mfPayload(file);
+    if(payload.projectSettings)apply3mfProjectSettings(payload.projectSettings);
+    await threeMfPreviousOpen({target:{files:[{name:payload.gcodePath,text:async()=>payload.gcode}],value:''}});
+    updateDesignModel();updateTemperatureBadge();fitLayerModel();
+    layerMessage('3MFから '+payload.gcodePath+' を読み込み、編集設定を復元しました。');
+  }catch(err){
+    layerMessage('3MFを開けませんでした：'+err.message,'error');
+  }finally{e.target.value='';}
+};
+
 // initial sample
 ta.value=makeInitialModel();
-// The bundled sample was authored for the original 0.8 mm setup.
+// Initial model and process settings reproduce the supplied sa.3mf.
 state.gcodeModel=parseProcessMarker(ta.value)||uiProcessModel();
 reparse(false);saveHistory();
 updateDesignModel();updateTemperatureBadge();updateEstimateUI();
