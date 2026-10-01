@@ -161,3 +161,14 @@ node --test tests/*.test.cjs
 `build.py` で単独動作する `index.html` を再生成します。
 
 機種・材料の追加分は `profiles.js`、`profile-panel.html`、`bambu-profiles.json` に分けています。HTMLへの数値埋め込みはビルド時に行い、使用時にネット接続は不要です。
+
+## License
+
+© 2026 Science Communication Design Laboratory, Kagawa University
+
+- **Code:** MIT License
+- **Documentation and educational materials:** CC BY 4.0
+- Third-party software, libraries, data, fonts, images, maps, and other external materials remain subject to their respective licenses and terms.
+
+See [LICENSE](./LICENSE) for details.
+
